@@ -6,6 +6,7 @@
 #include "event_loop.h"
 #include "exception.h"
 #include "socket.h"
+#include "block_queue.h"
 
 #include <concepts>
 #include <type_traits>
@@ -15,6 +16,8 @@
 #include <memory>
 #include <thread>
 #include <mutex>
+#include <ranges>
+#include <algorithm>
 
 namespace async::net {
 
@@ -38,6 +41,13 @@ namespace async::net {
 
         void run() {
             std::call_once(_flag, [ this ]() {init_thread(); });
+            while (true) {
+                auto func_opt = _queue.pop();
+                if (func_opt) {
+                    auto func_ptr = std::move(*func_opt);
+                    (*func_ptr)();
+                }
+            }
         }
 
         template<read_write_callback CallBack>
@@ -53,7 +63,7 @@ namespace async::net {
                     callback = std::forward<CallBack>(callback) ]() {
                         auto res = ::read(fd, (void*)buffer, size);
                         if (res == -1) {
-                            callback(0, *error_code::get_error_code(errno));
+                            callback(res, error_code{ errno });
                         }
                         else {
                             callback(res, error_code{ 0 });
@@ -79,7 +89,7 @@ namespace async::net {
                     callback = std::forward<CallBack>(callback) ]() {
                         auto res = ::write(fd, (void*)buffer, size);
                         if (res == -1) {
-                            callback(0, *error_code::get_error_code(errno));
+                            callback(res, error_code{ errno });
                         }
                         else {
                             callback(res, error_code{ 0 });
@@ -104,7 +114,7 @@ namespace async::net {
                 auto func_ptr = std::make_unique<std::function<void()>>([ this, fd, callback = std::forward<CallBack>(callback) ]() {
                     auto res = ::accept(fd, NULL, NULL);
                     if (res == -1) {
-                        callback(std::nullopt, *error_code::get_error_code(errno));
+                        callback(std::nullopt, error_code{ errno });
                     }
                     else {
                         std::optional client = async::net::tcp::socket<proactor, false>{ *this, res };
@@ -121,22 +131,28 @@ namespace async::net {
 
         private:
         void init_thread() {
-            _thread = std::jthread([ this ]() {
+            _dispatch_thread = std::jthread([ this ]() {
                 while (true) {
                     auto events = _loop.select(1024);
-                    for (auto& ev : events) {
-                        auto callback_ptr = (std::function<void()>*)ev.data.ptr;
-                        auto callback = std::move(*callback_ptr);
-                        std::destroy_at(callback_ptr);
-                        callback();
-                    }
+                    // for (auto& ev : events) {
+                    //     auto callback_ptr = (std::function<void()>*)ev.data.ptr;
+                    //     auto callback = std::move(*callback_ptr);
+                    //     std::destroy_at(callback_ptr);
+                    //     callback();
+                    auto rng = events | std::views::transform([ ](const auto& ev) {
+                        return std::unique_ptr<std::function<void()>>{ (std::function<void()>*)ev.data.ptr };
+                        });
+                    auto lock = _queue.lock();
+                    _queue.unsafe_append(rng.begin(), rng.end());
                 }
                 });
         }
 
+
         event_loop _loop;
-        std::jthread _thread;
+        std::jthread _dispatch_thread;
         std::once_flag _flag;
+        block_queue<std::unique_ptr<std::function<void()>>> _queue;
     };
 
 

@@ -35,7 +35,7 @@ namespace async::net::tcp {
         public:
         struct bad_fd {};
         using executor_type = Executor;
-        using callback_type = std::function<void()>;
+        using callback_type = std::function<void(unsigned int)>;
         static constexpr bool block = Block;
 
         socket(executor_type& executor):_executor{ executor }, _callback{ std::make_unique<callback_type>() }, _loop{ _executor.get_event_loop() } {
@@ -135,16 +135,55 @@ namespace async::net::tcp {
         }
 
         template<class CallBack>
-        auto async_connect(const endpoint& ep, CallBack&& callback) {
+        auto async_connect(endpoint& ep, CallBack&& callback) {
             static_assert(!Block, "Only support nonblocking socket.\n");
 
             epoll_event ev;
-            ev.events = EPOLLIN | EPOLLET;
+            ev.events = EPOLLOUT | EPOLLERR | EPOLLONESHOT;
+
 
             if constexpr (std::is_same_v<CallBack, use_coroutine>) {
 
             }
             else {
+                int res;
+                while (true) {
+                    res = ::connect(_fd, (const sockaddr*)(&ep.address()), ep.size());
+                    if (res == -1) {
+                        if (errno == EINTR)
+                            continue;
+                        else if (errno == EINPROGRESS) {//正在连接中，放进epoll监听。
+                            *_callback = [cb = std::forward<CallBack>(callback), this](unsigned int event) {
+                                if (event & EPOLLERR) {//连接出错。
+                                    int err;
+                                    socklen_t err_len = sizeof(err);
+                                    ::getsockopt(_fd, SOL_SOCKET, SO_ERROR, &err, &err_len);
+                                    cb(error_code{ err });
+                                }
+                                else {//连接成功。
+                                    cb(error_code{ 0 });
+                                }
+                            };
+                            ev.data.ptr = (void*)_callback.get();
+                            auto err = _loop.event_add(_fd, &ev);
+                            if (err)
+                                throw err;
+                            break;
+                        }
+                        else {//出错。
+                            _executor.post([cb = std::forward<CallBack>(callback), err = error_code{}]() {
+                                cb(err);
+                                });
+                            break;
+                        }
+                    }
+                    else {//连接成功。
+                        _executor.post([cb = std::forward<CallBack>(callback)]() {
+                            cb(error_code{ 0 });
+                            });
+                        break;
+                    }
+                }
 
             }
         }
@@ -163,7 +202,7 @@ namespace async::net::tcp {
                 auto res = ::accept(_fd, NULL, NULL);
                 if (-1 == res) {
                     if (errno == EAGAIN or errno == EWOULDBLOCK) {//accept阻塞，放进epoll监听
-                        *_callback = [this, cb = std::forward<CallBack>(callback), err = error_code{}]() {
+                        *_callback = [this, cb = std::forward<CallBack>(callback), err = error_code{}](unsigned int event) {
                             auto res = ::accept(_fd, NULL, NULL);
                             if (res == -1) {
                                 cb(socket{ _executor, bad_fd{} }, err);
@@ -205,7 +244,7 @@ namespace async::net::tcp {
                 auto res = ::read(_fd, buff, max_size);
                 if (res == -1) {
                     if (errno == EAGAIN or errno == EWOULDBLOCK) {//read阻塞，放进epoll监听
-                        *_callback = [this, buff, max_size, cb = std::forward<CallBack>(callback)]() {
+                        *_callback = [this, buff, max_size, cb = std::forward<CallBack>(callback)](unsigned int event) {
                             auto res = ::read(_fd, (void*)buff, max_size);
                             if (res == -1) {
                                 cb(-1, error_code{});
@@ -252,7 +291,7 @@ namespace async::net::tcp {
         int _fd;
         executor_type& _executor;
         event_loop& _loop;
-        std::unique_ptr<std::function<void()>> _callback;
+        std::unique_ptr<callback_type> _callback;
     };
 
 

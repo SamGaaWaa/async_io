@@ -49,12 +49,14 @@ namespace async::net::tcp {
                     auto events = _loop.select(1024);
 
                     auto rng = events | std::views::filter([ ](const auto& ev) {
-                        return *((std::function<void()>*)ev.data.ptr) != nullptr;
-                        }) | std::views::transform([ ](const auto& ev) {
-                            auto ptr = (std::function<void()>*)ev.data.ptr;
+                        return *((std::function<void(unsigned int)>*)ev.data.ptr) != nullptr;
+                        }) | std::views::transform([ ](const epoll_event& ev) {
+                            auto ptr = (std::function<void(unsigned int)>*)ev.data.ptr;
                             auto callback = std::move(*ptr);
                             *ptr = nullptr;
-                            return callback;
+                            return std::function<void()>([cb = std::move(callback), e = ev.events]() {
+                                cb(e);
+                                });
                             });
                         auto lock = _queue.lock();
                         _queue.unsafe_append(rng.begin(), rng.end());

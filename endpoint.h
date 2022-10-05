@@ -28,6 +28,7 @@ namespace async::net {
         }
 
         sockaddr_in& address()noexcept { return _address; }
+        socklen_t size()noexcept { return sizeof(_address); }
 
         private:
         sockaddr_in _address;

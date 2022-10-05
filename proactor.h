@@ -2,10 +2,8 @@
 #define __PROACTOR_H__
 
 
-#include "thread_pool.h"
 #include "event_loop.h"
 #include "exception.h"
-#include "socket.h"
 #include "block_queue.h"
 
 #include <concepts>
@@ -20,168 +18,60 @@
 #include <algorithm>
 #include <iostream>
 
-namespace async {
-    namespace net {
-        namespace tcp {
+namespace async::net::tcp {
 
+    class proactor {
+        public:
 
-            class proactor;
-            template<typename CallBack>
-            concept read_write_callback = requires (CallBack c, size_t size, error_code code) {
-                c(size, code);
-            };
+        proactor():_loop{ event_loop::get_event_loop() } {}
 
-            template<typename CallBack, typename Executor>
-            concept accept_callback = requires(std::optional<async::net::tcp::socket<Executor, false>> s, error_code code, CallBack c) {
-                c(s, code);
-            };
-
-            class proactor {
-                public:
-                struct use_coroutine {};
-
-                proactor() :_loop{ event_loop::get_event_loop() } {}
-
-                void run() {
-                    std::call_once(_flag, [ this ]() {init_thread(); });
-                    while (true) {
-                        auto func_opt = _queue.pop();
-                        if (func_opt) {
-                            auto func_ptr = std::move(*func_opt);
-                            (*func_ptr)();
-                        }
-                    }
+        void run() {
+            std::call_once(_flag, [this]() {init_thread(); });
+            while (true) {
+                auto func_opt = _queue.pop();
+                if (func_opt) {
+                    (*func_opt)();
                 }
-
-                template<read_write_callback CallBack>
-                auto async_read_some(int fd, auto* buffer, size_t size, CallBack&& callback) {
-                    epoll_event ev;
-                    ev.events = EPOLLIN;
-
-                    if constexpr (std::is_same_v<CallBack, use_coroutine>) {
-
-                    }
-                    else {
-                        std::cout << "async read some is running\n";
-                        auto func_ptr = std::make_unique<std::function<void()>>([ fd, buffer, size,
-                            callback = std::forward<CallBack>(callback) ]() {
-                                std::cout << "async read callback is running\n";
-                                auto res = ::read(fd, (void*)buffer, size);
-                                if (res == -1) {
-                                    callback(res, error_code{ errno });
-                                }
-                                else {
-                                    callback(res, error_code{ 0 });
-                                }
-                            });
-
-                        ev.data.ptr = (void*)func_ptr.release();
-                        _loop.event_add(fd, &ev);
-                    }
-                }
-
-
-                template<read_write_callback CallBack>
-                auto async_write_some(int fd, auto* buffer, size_t size, CallBack&& callback) {
-                    epoll_event ev;
-                    ev.events = EPOLLOUT;
-
-                    if constexpr (std::is_same_v<CallBack, use_coroutine>) {
-
-                    }
-                    else {
-                        auto func_ptr = std::make_unique<std::function<void()>>([ fd, buffer, size,
-                            callback = std::forward<CallBack>(callback) ]() {
-                                auto res = ::write(fd, (void*)buffer, size);
-                                if (res == -1) {
-                                    callback(res, error_code{ errno });
-                                }
-                                else {
-                                    callback(res, error_code{ 0 });
-                                }
-                            });
-
-                        ev.data.ptr = (void*)func_ptr.release();
-                        _loop.event_add(fd, &ev);
-                    }
-                }
-
-
-                template<class CallBack>
-                auto async_accept(int fd, CallBack&& callback) {
-                    epoll_event ev;
-                    ev.events = EPOLLIN | EPOLLONESHOT;
-
-                    if constexpr (std::is_same_v<CallBack, use_coroutine>) {
-
-                    }
-                    else {
-                        auto func_ptr = std::make_unique<std::function<void()>>([ this, fd, callback = std::forward<CallBack>(callback) ]() {
-                            auto res = ::accept(fd, NULL, NULL);
-
-                            char tmp[128];
-                            auto r = ::read(res, tmp, sizeof(tmp) - 1);
-                            if (r == -1) {
-                                std::cout << "##### read error: " << errno << '\n';
-                            }
-                            else {
-                                tmp[r] = '\0';
-                                std::cout << (char*)tmp << '\n';
-                            }
-
-
-                            if (res == -1) {
-                                auto code = error_code{ errno };
-                                callback(std::nullopt, code);
-                                std::cout << "fuck: " << code.what() << std::endl;
-                            }
-                            else {
-                                std::optional client = async::net::tcp::socket<proactor, false>{ *this, res };
-                                std::cout << "you " << client.value().native_handle();
-                                callback(std::move(client), error_code{ 0 });
-                            }
-
-                            });
-
-                        ev.data.ptr = (void*)func_ptr.release();
-                        auto res = _loop.event_add(fd, &ev);
-                        if (res)
-                            throw* res;
-                    }
-
-                }
-
-                private:
-                void init_thread() {
-                    _dispatch_thread = std::jthread([ this ]() {
-                        while (true) {
-                            auto events = _loop.select(1024);
-                            std::cout << "select " << events.size() << '\n';
-                            // for (auto& ev : events) {
-                            //     auto callback_ptr = (std::function<void()>*)ev.data.ptr;
-                            //     auto callback = std::move(*callback_ptr);
-                            //     std::destroy_at(callback_ptr);
-                            //     callback();
-                            auto rng = events | std::views::transform([ ](const auto& ev) {
-                                return std::unique_ptr<std::function<void()>>{ (std::function<void()>*)ev.data.ptr };
-                                });
-                            auto lock = _queue.lock();
-                            _queue.unsafe_append(rng.begin(), rng.end());
-                        }
-                        });
-                }
-
-
-                event_loop _loop;
-                std::jthread _dispatch_thread;
-                std::once_flag _flag;
-                block_queue<std::unique_ptr<std::function<void()>>> _queue;
-            };
-
-
+            }
         }
-    }
+
+        event_loop& get_event_loop()noexcept { return _loop; }
+
+        auto post(std::function<void()> func) {
+            _queue.push(std::move(func));
+        }
+
+
+        private:
+        void init_thread() {
+            _dispatch_thread = std::jthread([this]() {
+                while (true) {
+                    auto events = _loop.select(1024);
+
+                    auto rng = events | std::views::filter([ ](const auto& ev) {
+                        return *((std::function<void()>*)ev.data.ptr) != nullptr;
+                        }) | std::views::transform([ ](const auto& ev) {
+                            auto ptr = (std::function<void()>*)ev.data.ptr;
+                            auto callback = std::move(*ptr);
+                            *ptr = nullptr;
+                            return callback;
+                            });
+                        auto lock = _queue.lock();
+                        _queue.unsafe_append(rng.begin(), rng.end());
+                }
+                });
+        }
+
+
+        event_loop _loop;
+        std::jthread _dispatch_thread;
+        std::once_flag _flag;
+        block_queue<std::function<void()>> _queue;
+    };
+
+
 }
+
 
 
 

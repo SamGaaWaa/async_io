@@ -124,9 +124,11 @@
 
 #include "socket.h"
 #include "proactor.h"
+#include "exception.h"
 
 #include <iostream>
 #include <array>
+#include <memory>
 
 int main() {
     async::net::tcp::proactor executor;
@@ -134,28 +136,27 @@ int main() {
 
     auto err = sock.bind("127.0.0.1", 9999);
     if (err) {
-        std::cerr << "bind error\n" << (*err).what() << '\n';
+        std::cerr << "bind error\n" << err.what() << '\n';
         return -1;
     }
 
     err = sock.listen();
     if (err) {
-        std::cerr << "listen error\n" << (*err).what() << '\n';
+        std::cerr << "listen error\n" << err.what() << '\n';
         return -1;
     }
 
 
     std::array<char, 1024> buffer;
 
-    sock.async_accept([ & ](std::optional<async::net::tcp::socket<async::net::tcp::proactor, false>> socket_opt, async::error_code err) {
-        if (socket_opt) {
-            auto client = std::move(*socket_opt);
-            std::cout << "success: " << client.native_handle() << "\n";
+    sock.async_accept([&](async::net::tcp::socket<> socket, async::error_code err) {
+        if (socket.valid()) {
+            auto client = std::make_shared<async::net::tcp::socket<>>(std::move(socket));
 
-            client.async_read(buffer.data(), buffer.size() - 1, [ & ](size_t size, async::error_code err) {
-                if (true) {
+            client->async_read(buffer.data(), buffer.size() - 1, [&, client](int size, async::error_code err) {
+                if (!err and size > 0) {
                     buffer[size] = '\0';
-                    std::cout << "Has received: " << buffer.data() << '\n';
+                    std::cout << "Has received " << size << " bytes: " << buffer.data() << '\n';
                 }
                 });
         }
@@ -168,3 +169,4 @@ int main() {
     executor.run();
 
 }
+

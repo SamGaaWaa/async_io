@@ -19,7 +19,7 @@ namespace async::net {
         endpoint(const char* ip, int port)noexcept {
             memset(&_address, 0, sizeof(_address));
             _address.sin_family = AF_INET;
-            _address.sin_port = port;
+            _address.sin_port = ::htons(port);
             inet_aton(ip, &_address.sin_addr);
         }
 

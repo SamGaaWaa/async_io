@@ -34,7 +34,7 @@ namespace async {
             std::optional<T> res;
             try {
                 std::unique_lock l{ _m };
-                _condition_variable.wait(l, [ this ] { return !_queue.empty(); });
+                _condition_variable.wait(l, [this] { return !_queue.empty(); });
                 res = std::move(_queue.front());
                 _queue.pop_front();
                 _size.fetch_sub(1);
@@ -57,7 +57,7 @@ namespace async {
 
         template<class Iter1, class Iter2>
         void unsafe_append(Iter1&& first, Iter2&& last) {
-            _queue.insert(_queue.end(), first, last);
+            _queue.insert(_queue.end(), std::forward<Iter1>(first), std::forward<Iter2>(last));
             _size = _queue.size();
             _condition_variable.notify_all();
         }

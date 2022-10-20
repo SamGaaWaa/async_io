@@ -18,7 +18,7 @@
 
 namespace async::net::tcp {
 
-    struct use_coroutine {};
+    struct use_coroutine_t {};
 
     // template<typename CallBack>
     // concept read_write_callback = requires (CallBack c, size_t size, error_code code) {
@@ -145,7 +145,7 @@ namespace async::net::tcp {
             ev.events = EPOLLOUT | EPOLLERR | EPOLLONESHOT;
 
 
-            if constexpr (std::is_same_v<CallBack, use_coroutine>) {
+            if constexpr (std::is_same_v<CallBack, use_coroutine_t>) {
 
             }
             else {
@@ -198,7 +198,7 @@ namespace async::net::tcp {
             epoll_event ev;
             ev.events = EPOLLIN | EPOLLET;
 
-            if constexpr (std::is_same_v<CallBack, use_coroutine>) {
+            if constexpr (std::is_same_v<CallBack, use_coroutine_t>) {
 
             }
             else {
@@ -253,7 +253,7 @@ namespace async::net::tcp {
             epoll_event ev;
             ev.events = EPOLLIN | EPOLLET;
 
-            if constexpr (std::is_same_v<CallBack, use_coroutine>) {
+            if constexpr (std::is_same_v<CallBack, use_coroutine_t>) {
 
             }
             else {
@@ -310,7 +310,7 @@ namespace async::net::tcp {
             epoll_event ev;
             ev.events = EPOLLOUT | EPOLLET;
 
-            if constexpr (std::is_same_v<CallBack, use_coroutine>) {
+            if constexpr (std::is_same_v<CallBack, use_coroutine_t>) {
 
             }
             else {

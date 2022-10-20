@@ -62,6 +62,27 @@ namespace async::net {
             return events;
         }
 
+        int select(epoll_event* buff, size_t max_size, int timeout = -1)noexcept {
+            int res;
+            while ((res = ::epoll_wait(_epoll_fd, buff, max_size, timeout)) == -1) {
+                if (errno == EINTR)
+                    continue;
+                return res;
+            }
+            return res;
+        }
+
+        int select(std::vector<epoll_event>& buffer, int timeout = -1)noexcept {
+            int res;
+            while ((res = ::epoll_wait(_epoll_fd, buffer.data(), buffer.size(), timeout)) == -1) {
+                if (errno == EINTR)
+                    continue;
+                return res;
+            }
+            return res;
+        }
+
+
         static event_loop get_event_loop() {
             int res = ::epoll_create(1);
             if (res == -1) {

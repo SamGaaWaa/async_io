@@ -1,4 +1,4 @@
-all: build/main.out build/client.out
+all: build/main.out build/client.out build/coro_test.out
 
 build/main.out: test/main.cpp
 	g++ -g -I . -O0 -fcoroutines -Wall -pthread -std=c++2a $^ -o $@
@@ -6,8 +6,14 @@ build/main.out: test/main.cpp
 build/client.out: test/client.cpp
 	g++ -g -I . -O0 -fcoroutines -Wall -pthread -std=c++2a $^ -o $@
 
+build/coro_test.out: test/coro_test.cpp
+	g++ -g -I . -O0 -fcoroutines -Wall -pthread -std=c++2a $^ -o $@	
+
 clean:
 	rm build/*
 
 start:
 	./build/main.out 127.0.0.1 8022
+
+coro_test:
+	./build/coro_test.out 127.0.0.1 8022

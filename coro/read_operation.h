@@ -5,46 +5,82 @@
 #include <stddef.h>
 #include <unistd.h>
 #include <tuple>
-#include <functional>
+#include <iostream>
 
 #include "exception.h"
+#include "socket.h"
 
 namespace async::net::tcp {
 
-    template<class Executor>
+    template<class Socket>
     struct read_operation {
-        int fd;
-        char* buffer;
-        int size;
-        error_code error;
 
+        read_operation(char* buff, size_t max_size, Socket& socket)noexcept:
+            _buffer{ buff },
+            _max_size{ max_size },
+            _socket{ socket } {}
 
         bool await_ready()noexcept {
-            auto res = ::read(fd, (void*)buffer, size);
+            std::cout << "await_ready.\n";
+            auto res = ::read(_socket.native_handle(), (void*)_buffer, _max_size);
             if (res == -1) {
                 if (errno == EAGAIN or errno == EWOULDBLOCK) {//read阻塞，放进epoll监听
-
+                    _state = LISTENING;
+                    return false;
                 }
                 else {//read出错
-                    size = -1;
-                    error = error_code{};
+                    _result = -1;
+                    _error = error_code{};
+                    _state = ERROR;
                     return true;
                 }
             }
             else {//读取成功
-                size = res;
-                error = { 0 };
+                _result = res;
+                _error = { 0 };
+                _state = READY;
                 return true;
             }
         }
 
-        auto await_suspend(std::coroutine_handle<> h)noexcept {
-
+        bool await_suspend(std::coroutine_handle<> h)noexcept {
+            std::cout << "await_suspend.\n";
+            auto err = _socket.async_read(_buffer, _max_size, h);
+            if (err) {              //加入epoll出错，说明不会在其他线程恢复，*this不会被析构
+                _state = ERROR;
+                _result = -1;
+                _error = err;
+                std::cerr << err.what() << '\n';
+                return false;
+            }
+            std::cout << "Waiting.\n";
+            return true;
         }
 
         auto await_resume()noexcept {
-            return std::tuple{ size, error };
+            std::cout << "await_resume.\n";
+            if (_state == READY or _state == ERROR) {
+                return std::tuple{ _result, _error };
+            }
+            auto res = ::read(_socket.native_handle(), (void*)_buffer, _max_size);
+            if (res == -1) {
+                _result = -1;
+                _error = error_code{};
+            }
+            else {//读取成功
+                _result = res;
+                _error = { 0 };
+            }
+            return std::tuple{ _result, _error };
         }
+
+        private:
+        char* _buffer;
+        size_t      _max_size;
+        int         _result;
+        error_code  _error;
+        enum { READY, ERROR, LISTENING }_state;
+        Socket& _socket;
     };
 
 }

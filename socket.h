@@ -9,12 +9,14 @@
 #include "endpoint.h"
 #include "sys/epoll.h"
 #include "proactor.h"
+#include "coro/read_operation.h"
 
 #include <optional>
 #include <cstring>
 #include <limits>
 #include <functional>
 #include <concepts>
+#include <coroutine>
 
 namespace async::net::tcp {
 
@@ -36,6 +38,7 @@ namespace async::net::tcp {
         struct bad_fd {};
         using executor_type = Executor;
         using callback_type = std::function<void(unsigned int)>;
+        using socket_type = socket<executor_type, Block>;
         static constexpr bool block = Block;
 
         socket(executor_type& executor):_executor{ executor }, _callback{ std::make_unique<callback_type>() }, _loop{ _executor.get_event_loop() } {
@@ -247,64 +250,88 @@ namespace async::net::tcp {
         }
 
         template<class CallBack>
-        auto async_read(auto* buff, size_t max_size, CallBack&& callback) {
+        auto async_read(char* buff, size_t max_size, CallBack&& callback) {
             static_assert(!Block, "Only support nonblocking socket.\n");
 
             epoll_event ev;
             ev.events = EPOLLIN | EPOLLET;
 
-            if constexpr (std::is_same_v<CallBack, use_coroutine_t>) {
-
-            }
-            else {
-                auto res = ::read(_fd, buff, max_size);
-                if (res == -1) {
-                    if (errno == EAGAIN or errno == EWOULDBLOCK) {//read阻塞，放进epoll监听
-                        *_callback = [this, buff, max_size, cb = std::forward<CallBack>(callback)](unsigned int event) {
-                            auto res = ::read(_fd, (void*)buff, max_size);
-                            if (res == -1) {
-                                cb(-1, error_code{});
-                            }
-                            else {
-                                cb(res, error_code{ 0 });
-                            }
-                        };
-                        ev.data.ptr = (void*)_callback.get();
-                        if (_in_poll) {
-                            auto err = _loop.event_mod(_fd, &ev);
-                            if (err) {
-                                std::cerr << "async_read event_mod error: " << err.what() << '\n';
-                                throw err;
-                            }
+            auto res = ::read(_fd, buff, max_size);
+            if (res == -1) {
+                if (errno == EAGAIN or errno == EWOULDBLOCK) {//read阻塞，放进epoll监听
+                    *_callback = [this, buff, max_size, cb = std::forward<CallBack>(callback)](unsigned int event) {
+                        auto res = ::read(_fd, (void*)buff, max_size);
+                        if (res == -1) {
+                            cb(-1, error_code{});
                         }
                         else {
-                            auto err = _loop.event_add(_fd, &ev);
-                            if (err) {
-                                std::cerr << "async_read event_add error: " << err.what() << '\n';
-                                throw err;
-                            }
-                            _in_poll = true;
+                            cb(res, error_code{ 0 });
+                        }
+                    };
+
+                    ev.data.ptr = (void*)_callback.get();
+                    if (_in_poll) {
+                        auto err = _loop.event_mod(_fd, &ev);
+                        if (err) {
+                            std::cerr << "async_read event_mod error: " << err.what() << '\n';
+                            throw err;
                         }
                     }
-                    else {//read出错
-                        _executor.post([cb = std::forward<CallBack>(callback), err = error_code{}]() {
-                            cb(-1, err);
-                            });
+                    else {
+                        auto err = _loop.event_add(_fd, &ev);
+                        if (err) {
+                            std::cerr << "async_read event_add error: " << err.what() << '\n';
+                            throw err;
+                        }
+                        _in_poll = true;
                     }
                 }
-                else {//读取成功或连接断开（res为0）
-                    _executor.post([cb = std::forward<CallBack>(callback), res]() {
-                        cb(res, error_code{ 0 });
+                else {//read出错
+                    _executor.post([cb = std::forward<CallBack>(callback), err = error_code{}]() {
+                        cb(-1, err);
                         });
                 }
-
+            }
+            else {//读取成功或连接断开（res为0）
+                _executor.post([cb = std::forward<CallBack>(callback), res]() {
+                    cb(res, error_code{ 0 });
+                    });
             }
 
         }
 
+        auto async_read(char* buff, size_t max_size, std::coroutine_handle<> h) {
+            static_assert(!Block, "Only support nonblocking socket.\n");
+
+            epoll_event ev;
+            ev.events = EPOLLIN | EPOLLET;
+
+            *_callback = [h](unsigned int event) {
+                h();        //协程恢复
+            };
+
+            ev.data.ptr = (void*)_callback.get();
+            if (_in_poll) {
+                auto err = _loop.event_mod(_fd, &ev);
+                if (err) {      //如果已经在epoll里，还出错，无法处理，因为awaitable对象可能已经析构。
+                    std::cerr << "async_read event_add error: " << err.what() << '\n';
+                    throw err;
+                }
+            }
+            else {
+                auto err = _loop.event_add(_fd, &ev);
+                if (!err)
+                    _in_poll = true;
+                return err;
+            }
+        }
+
+        read_operation<socket_type> async_read(char* buff, size_t max_size) {
+            return { buff, max_size, *this };
+        }
 
         template<class CallBack>
-        auto async_write(auto* buff, size_t max_size, CallBack&& callback) {
+        auto async_write(char* buff, size_t max_size, CallBack&& callback) {
             static_assert(!Block, "Only support nonblocking socket.\n");
 
             epoll_event ev;

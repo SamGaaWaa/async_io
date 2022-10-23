@@ -15,7 +15,7 @@ namespace async::net::tcp {
     template<class Socket>
     struct accept_operation {
         using socket_type = Socket;
-        socket_type::get_executor();
+
         accept_operation(socket_type& socket)noexcept:_socket{ socket }, _result{} {}
 
         bool await_ready()noexcept {
@@ -29,7 +29,7 @@ namespace async::net::tcp {
                 return true;
             }
             else {//accept成功
-                _result.emplace<1>(_socket.get_executor(), res);
+                _result.template emplace<1>(_socket.get_executor(), res);
                 return true;
             }
         }

@@ -10,6 +10,8 @@
 #include "sys/epoll.h"
 #include "proactor.h"
 #include "coro/read_operation.h"
+#include "coro/write_operation.h"
+#include "coro/accept_operation.h"
 
 #include <optional>
 #include <cstring>
@@ -201,60 +203,80 @@ namespace async::net::tcp {
             epoll_event ev;
             ev.events = EPOLLIN | EPOLLET;
 
-            if constexpr (std::is_same_v<CallBack, use_coroutine_t>) {
-
-            }
-            else {
-                auto res = ::accept(_fd, NULL, NULL);
-                if (-1 == res) {
-                    if (errno == EAGAIN or errno == EWOULDBLOCK) {//accept阻塞，放进epoll监听
-                        *_callback = [this, cb = std::forward<CallBack>(callback), err = error_code{}](unsigned int event) {
-                            auto res = ::accept(_fd, NULL, NULL);
-                            if (res == -1) {
-                                cb(socket{ _executor, bad_fd{} }, err);
-                                return;
-                            }
-
-                            cb(socket{ _executor, res }, error_code{ 0 });
-                        };
-                        ev.data.ptr = (void*)_callback.get();
-                        if (_in_poll) {
-                            auto err = _loop.event_mod(_fd, &ev);
-                            if (err) {
-                                std::cerr << "async_accept event_mod error: " << err.what() << '\n';
-                                throw err;
-                            }
-                        }
-                        else {
-                            auto err = _loop.event_add(_fd, &ev);
-                            if (err) {
-                                std::cerr << "async_accept event_add error: " << err.what() << '\n';
-                                throw err;
-                            }
-                            _in_poll = true;
-                        }
-
-                    }
-                    else {//accept出错
-                        _executor.post([this, cb = std::forward<CallBack>(callback), err = error_code{}] {
+            auto res = ::accept(_fd, NULL, NULL);
+            if (-1 == res) {
+                if (errno == EAGAIN or errno == EWOULDBLOCK) {//accept阻塞，放进epoll监听
+                    *_callback = [this, cb = std::forward<CallBack>(callback), err = error_code{}](unsigned int event) {
+                        auto res = ::accept(_fd, NULL, NULL);
+                        if (res == -1) {
                             cb(socket{ _executor, bad_fd{} }, err);
-                            });
-                    }
-                }
-                else {//accept成功
-                    _executor.post([cb = std::forward<CallBack>(callback), this, res]() {
+                            return;
+                        }
+
                         cb(socket{ _executor, res }, error_code{ 0 });
+                    };
+                    ev.data.ptr = (void*)_callback.get();
+                    if (_in_poll) {
+                        auto err = _loop.event_mod(_fd, &ev);
+                        if (err) {
+                            // std::cerr << "async_accept event_mod error: " << err.what() << '\n';
+                            throw err;
+                        }
+                    }
+                    else {
+                        auto err = _loop.event_add(_fd, &ev);
+                        if (err) {
+                            // std::cerr << "async_accept event_add error: " << err.what() << '\n';
+                            throw err;
+                        }
+                        _in_poll = true;
+                    }
+
+                }
+                else {//accept出错
+                    _executor.post([this, cb = std::forward<CallBack>(callback), err = error_code{}] {
+                        cb(socket{ _executor, bad_fd{} }, err);
                         });
                 }
             }
+            else {//accept成功
+                _executor.post([cb = std::forward<CallBack>(callback), this, res]() {
+                    cb(socket{ _executor, res }, error_code{ 0 });
+                    });
+            }
+
         }
+
+        auto async_accept(std::coroutine_handle<> h) {
+            static_assert(!Block, "Only support nonblocking socket.\n");
+
+            epoll_event ev;
+            ev.events = EPOLLIN | EPOLLET;
+
+            *_callback = [h](unsigned int event) {
+                h();        //协程恢复
+            };
+
+            ev.data.ptr = (void*)_callback.get();
+            if (_in_poll) {
+                return _loop.event_mod(_fd, &ev);
+            }
+            else {
+                auto err = _loop.event_add(_fd, &ev);
+                if (!err)
+                    _in_poll = true;
+                return err;
+            }
+        }
+
+        accept_operation<socket_type> async_accept()noexcept { return { *this }; }
 
         template<class CallBack>
         auto async_read(char* buff, size_t max_size, CallBack&& callback) {
             static_assert(!Block, "Only support nonblocking socket.\n");
 
             epoll_event ev;
-            ev.events = EPOLLIN | EPOLLET;
+            ev.events = EPOLLIN | EPOLLET | EPOLLONESHOT;
 
             auto res = ::read(_fd, buff, max_size);
             if (res == -1) {
@@ -273,14 +295,14 @@ namespace async::net::tcp {
                     if (_in_poll) {
                         auto err = _loop.event_mod(_fd, &ev);
                         if (err) {
-                            std::cerr << "async_read event_mod error: " << err.what() << '\n';
+                            // std::cerr << "async_read event_mod error: " << err.what() << '\n';
                             throw err;
                         }
                     }
                     else {
                         auto err = _loop.event_add(_fd, &ev);
                         if (err) {
-                            std::cerr << "async_read event_add error: " << err.what() << '\n';
+                            // std::cerr << "async_read event_add error: " << err.what() << '\n';
                             throw err;
                         }
                         _in_poll = true;
@@ -304,7 +326,7 @@ namespace async::net::tcp {
             static_assert(!Block, "Only support nonblocking socket.\n");
 
             epoll_event ev;
-            ev.events = EPOLLIN | EPOLLET;
+            ev.events = EPOLLIN | EPOLLET | EPOLLONESHOT;
 
             *_callback = [h](unsigned int event) {
                 h();        //协程恢复
@@ -312,11 +334,7 @@ namespace async::net::tcp {
 
             ev.data.ptr = (void*)_callback.get();
             if (_in_poll) {
-                auto err = _loop.event_mod(_fd, &ev);
-                if (err) {      //如果已经在epoll里，还出错，无法处理，因为awaitable对象可能已经析构。
-                    std::cerr << "async_read event_add error: " << err.what() << '\n';
-                    throw err;
-                }
+                return _loop.event_mod(_fd, &ev);
             }
             else {
                 auto err = _loop.event_add(_fd, &ev);
@@ -326,7 +344,7 @@ namespace async::net::tcp {
             }
         }
 
-        read_operation<socket_type> async_read(char* buff, size_t max_size) {
+        read_operation<socket_type> async_read(char* buff, size_t max_size)noexcept {
             return { buff, max_size, *this };
         }
 
@@ -335,55 +353,78 @@ namespace async::net::tcp {
             static_assert(!Block, "Only support nonblocking socket.\n");
 
             epoll_event ev;
-            ev.events = EPOLLOUT | EPOLLET;
+            ev.events = EPOLLOUT | EPOLLET | EPOLLONESHOT;
 
-            if constexpr (std::is_same_v<CallBack, use_coroutine_t>) {
-
-            }
-            else {
-                auto res = ::write(_fd, buff, max_size);
-                if (res == -1) {
-                    if (errno == EAGAIN or errno == EWOULDBLOCK) {//write阻塞，放进epoll监听
-                        *_callback = [this, buff, max_size, cb = std::forward<CallBack>(callback)](unsigned int event) {
-                            auto res = ::write(_fd, (void*)buff, max_size);
-                            if (res == -1) {
-                                cb(-1, error_code{});
-                            }
-                            else {
-                                cb(res, error_code{ 0 });
-                            }
-                        };
-                        ev.data.ptr = (void*)_callback.get();
-                        if (_in_poll) {
-                            auto err = _loop.event_mod(_fd, &ev);
-                            if (err) {
-                                std::cerr << "async_write event_mod error: " << err.what() << '\n';
-                                throw err;
-                            }
+            auto res = ::write(_fd, buff, max_size);
+            if (res == -1) {
+                if (errno == EAGAIN or errno == EWOULDBLOCK) {//write阻塞，放进epoll监听
+                    *_callback = [this, buff, max_size, cb = std::forward<CallBack>(callback)](unsigned int event) {
+                        auto res = ::write(_fd, (void*)buff, max_size);
+                        if (res == -1) {
+                            cb(-1, error_code{});
                         }
                         else {
-                            auto err = _loop.event_add(_fd, &ev);
-                            if (err) {
-                                std::cerr << "async_write event_add error: " << err.what() << '\n';
-                                throw err;
-                            }
-                            _in_poll = true;
+                            cb(res, error_code{ 0 });
+                        }
+                    };
+                    ev.data.ptr = (void*)_callback.get();
+                    if (_in_poll) {
+                        auto err = _loop.event_mod(_fd, &ev);
+                        if (err) {
+                            // std::cerr << "async_write event_mod error: " << err.what() << '\n';
+                            throw err;
                         }
                     }
-                    else {//write出错
-                        _executor.post([cb = std::forward<CallBack>(callback), err = error_code{}]() {
-                            cb(-1, err);
-                            });
+                    else {
+                        auto err = _loop.event_add(_fd, &ev);
+                        if (err) {
+                            // std::cerr << "async_write event_add error: " << err.what() << '\n';
+                            throw err;
+                        }
+                        _in_poll = true;
                     }
                 }
-                else {//输出成功或连接断开（res为0）
-                    _executor.post([cb = std::forward<CallBack>(callback), res]() {
-                        cb(res, error_code{ 0 });
+                else {//write出错
+                    _executor.post([cb = std::forward<CallBack>(callback), err = error_code{}]() {
+                        cb(-1, err);
                         });
                 }
-
+            }
+            else {//输出成功或连接断开（res为0）
+                _executor.post([cb = std::forward<CallBack>(callback), res]() {
+                    cb(res, error_code{ 0 });
+                    });
             }
 
+
+
+        }
+
+
+        auto async_write(char* buff, size_t max_size, std::coroutine_handle<> h) {
+            static_assert(!Block, "Only support nonblocking socket.\n");
+
+            epoll_event ev;
+            ev.events = EPOLLOUT | EPOLLET | EPOLLONESHOT;
+
+            *_callback = [h](unsigned int event) {
+                h();        //协程恢复
+            };
+
+            ev.data.ptr = (void*)_callback.get();
+            if (_in_poll) {
+                return _loop.event_mod(_fd, &ev);
+            }
+            else {
+                auto err = _loop.event_add(_fd, &ev);
+                if (!err)
+                    _in_poll = true;
+                return err;
+            }
+        }
+
+        write_operation<socket_type> async_write(char* buff, size_t max_size)noexcept {
+            return { buff, max_size, *this };
         }
 
 

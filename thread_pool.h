@@ -47,11 +47,11 @@ namespace async {
 
         explicit thread_pool(int x) {
             for (auto i{ 0 }; i < x; ++i) {
-                _threads.emplace_back([ this ] {
+                _threads.emplace_back([this] {
                     while (!_stop) {
                         auto task = _queue.pop();
                         if (task)
-                            task.value()();
+                            (*task)();
                     }
                     });
             }
@@ -72,31 +72,31 @@ namespace async {
         template<class Func, class CallBack>
         //            requires thread_pool_callback<Func, CallBack>::value
         auto post(Func&& func, CallBack&& call_back) {
-            _queue.push([ task = std::forward<Func>(func),
-                call_back = std::forward<CallBack>(call_back) ] {
+            _queue.push([task = std::forward<Func>(func),
+                call_back = std::forward<CallBack>(call_back)] {
                     using result_type = std::invoke_result_t<Func>;
-                    if constexpr (std::is_same<result_type, void>::value) {
-                        std::exception_ptr ptr;
-                        try {
-                            task();
-                        }
-                        catch (...) {
-                            ptr = std::current_exception();
-                        }
-                        call_back(ptr);
-                    }
-                    else {
-                        std::exception_ptr ptr;
-                        std::optional<result_type> res;
-                        try {
-                            res = task();
-                        }
-                        catch (...) {
-                            ptr = std::current_exception();
-                            res = std::nullopt;
-                        }
-                        call_back(ptr, std::move(res));
-                    }
+            if constexpr (std::is_same<result_type, void>::value) {
+                std::exception_ptr ptr;
+                try {
+                    task();
+                }
+                catch (...) {
+                    ptr = std::current_exception();
+                }
+                call_back(ptr);
+            }
+            else {
+                std::exception_ptr ptr;
+                std::optional<result_type> res;
+                try {
+                    res = task();
+                }
+                catch (...) {
+                    ptr = std::current_exception();
+                    res = std::nullopt;
+                }
+                call_back(ptr, std::move(res));
+            }
                 });
         }
 
@@ -110,9 +110,9 @@ namespace async {
         void stop() {
             auto counter = std::make_shared<std::atomic_int64_t>(_threads.size() + 1);
             for (auto i{ 0 }; i < _threads.size(); ++i) {
-                _queue.push([ counter ] {
+                _queue.push([counter] {
                     counter->fetch_sub(1);
-                    while (*counter != 0);
+                while (*counter != 0);
                     });
             }
             while (*counter != 1);

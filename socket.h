@@ -12,6 +12,7 @@
 #include "coro/read_operation.h"
 #include "coro/write_operation.h"
 #include "coro/accept_operation.h"
+#include "coro/connect_operation.h"
 
 #include <optional>
 #include <cstring>
@@ -149,51 +150,81 @@ namespace async::net::tcp {
             epoll_event ev;
             ev.events = EPOLLOUT | EPOLLERR | EPOLLONESHOT;
 
-
-            if constexpr (std::is_same_v<CallBack, use_coroutine_t>) {
-
-            }
-            else {
-                int res;
-                while (true) {
-                    res = ::connect(_fd, (const sockaddr*)(&ep.address()), ep.size());
-                    if (res == -1) {
-                        if (errno == EINTR)
-                            continue;
-                        else if (errno == EINPROGRESS) {//正在连接中，放进epoll监听。
-                            *_callback = [cb = std::forward<CallBack>(callback), this](unsigned int event) {
-                                if (event & EPOLLERR) {//连接出错。
-                                    int err;
-                                    socklen_t err_len = sizeof(err);
-                                    ::getsockopt(_fd, SOL_SOCKET, SO_ERROR, &err, &err_len);
-                                    cb(error_code{ err });
-                                }
-                                else {//连接成功。
-                                    cb(error_code{ 0 });
-                                }
-                            };
-                            ev.data.ptr = (void*)_callback.get();
-                            auto err = _loop.event_add(_fd, &ev);
-                            if (err)
+            int res;
+            while (true) {
+                res = ::connect(_fd, (const sockaddr*)(&ep.address()), ep.size());
+                if (res == -1) {
+                    if (errno == EINTR)
+                        continue;
+                    else if (errno == EINPROGRESS or errno == EAGAIN) {//正在连接中，放进epoll监听。
+                        *_callback = [cb = std::forward<CallBack>(callback), this](unsigned int event) {
+                            if (event & EPOLLERR) {//连接出错。
+                                int err;
+                                socklen_t err_len = sizeof(err);
+                                ::getsockopt(_fd, SOL_SOCKET, SO_ERROR, &err, &err_len);
+                                cb(error_code{ err });
+                            }
+                            else {//连接成功。
+                                cb(error_code{ 0 });
+                            }
+                        };
+                        ev.data.ptr = (void*)_callback.get();
+                        if (_in_poll) {
+                            auto err = _loop.event_mod(_fd, &ev);
+                            if (err) {
                                 throw err;
-                            break;
+                            }
                         }
-                        else {//出错。
-                            _executor.post([cb = std::forward<CallBack>(callback), err = error_code{}]() {
-                                cb(err);
-                                });
-                            break;
+                        else {
+                            auto err = _loop.event_add(_fd, &ev);
+                            if (err) {
+                                throw err;
+                            }
+                            _in_poll = true;
                         }
+                        break;
                     }
-                    else {//连接成功。
-                        _executor.post([cb = std::forward<CallBack>(callback)]() {
-                            cb(error_code{ 0 });
+                    else {//出错。
+                        _executor.post([cb = std::forward<CallBack>(callback), err = error_code{}]() {
+                            cb(err);
                             });
                         break;
                     }
                 }
-
+                else {//连接成功。
+                    _executor.post([cb = std::forward<CallBack>(callback)]() {
+                        cb(error_code{ 0 });
+                        });
+                    break;
+                }
             }
+        }
+
+        auto async_connect(endpoint& ep, std::coroutine_handle<> h)noexcept {
+            static_assert(!Block, "Only support nonblocking socket.\n");
+
+            epoll_event ev;
+            ev.events = EPOLLOUT | EPOLLERR | EPOLLONESHOT;
+
+            *_callback = [h](unsigned int) {
+                h();
+            };
+            ev.data.ptr = (void*)_callback.get();
+            if (_in_poll) {
+                return _loop.event_mod(_fd, &ev);
+            }
+            else {
+                auto err = _loop.event_add(_fd, &ev);
+                if (!err) {
+                    _in_poll = true;
+                }
+                return err;
+            }
+        }
+
+        auto async_connect(endpoint& ep)noexcept {
+            static_assert(!Block, "Only support nonblocking socket.\n");
+            return connect_operation{ *this, ep };
         }
 
         template<class CallBack>

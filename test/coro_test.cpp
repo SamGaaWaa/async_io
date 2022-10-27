@@ -8,22 +8,26 @@
 #include <thread>
 
 
-async::task read_task(async::net::tcp::socket<> socket) {
-    std::cout << "Start coroutine.\n";
-    std::array<char, 128> tmp;
+async::task echo_session(async::net::tcp::socket<> socket) {
+    std::array<char, 128> buffer;
 
-    auto res = co_await socket.async_accept();
+    std::variant res = co_await socket.async_accept();
+
     auto client = std::get_if<0>(&res);
     if (!client) {
-        std::cerr << "accept error.\n";
+        std::cerr << "accept error.\n" << std::get<1>(res).what() << '\n';
         co_return;
     }
 
     while (true) {
-        auto [res, err] = co_await client->async_read(tmp.data(), tmp.size() - 1);
+        auto [res, err] = co_await client->async_read(buffer.data(), buffer.size() - 1);
         if (!err) {
-            tmp[res] = '\0';
-            std::cout << "coroutine read: " << tmp.data() << '\n';
+            if (res == 0) {
+                std::cout << "Connection break.\n";
+                co_return;
+            }
+            buffer[res] = '\0';
+            std::cout << "coroutine read: " << buffer.data() << '\n';
         }
         else {
             std::cerr << "coroutine error.\n";
@@ -31,8 +35,7 @@ async::task read_task(async::net::tcp::socket<> socket) {
             continue;
         }
 
-
-        co_await client->async_write(tmp.data(), res);
+        co_await client->async_write(buffer.data(), res);
     }
 }
 
@@ -60,16 +63,7 @@ int main(int argc, char** argv) {
         return -1;
     }
 
-    // socket.async_accept([ ](async::net::tcp::socket<> client, async::error_code err) {
-    //     if (!err) {
-    //         auto task = read_task(std::move(client));
-    //         while (!task.done());
-    //     }
-    //     else {
-    //         std::cerr << "Accept error.\n";
-    //     }
-    //     });
-    auto task = read_task(std::move(socket));
+    auto task = echo_session(std::move(socket));
 
     std::thread other_thread = std::thread{ [&] {executor.run(); } };
     executor.run();
